@@ -1,128 +1,155 @@
+import json
 import os
 import sys
+import time
 import requests
-from openpyxl import load_workbook
-from openpyxl.comments import Comment
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 API_URL = "https://randomuser.me/api/1.4/"
-WORKBOOK_PATH = os.getenv("WORKBOOK_PATH", "B7344.xlsx")
-SHEET_NAME = "Work 1"
-FIRST_ROW = 3
-LAST_ROW = 400
-FIRST_COL = 2  # B
-LAST_COL = 6   # F — never access or modify columns A or G+
-COUNT = LAST_ROW - FIRST_ROW + 1
-SEED = os.getenv("RANDOMUSER_SEED", "excel-agent-demo")
-COMMENT_AUTHOR = "RandomUser Agent"
+COUNT = 398
+TITLE = "RandomUser Threaded Data"
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+SHARE_WITH_EMAIL = os.environ["SHARE_WITH_EMAIL"].strip()
 
-def full_name(user):
-    name = user.get("name") or {}
-    return " ".join(
-        str(part).strip()
-        for part in (name.get("title"), name.get("first"), name.get("last"))
-        if part not in (None, "")
-    ).strip()
-
-def full_address(user):
-    loc = user.get("location") or {}
-    street = loc.get("street") or {}
-    street_text = " ".join(
-        str(street.get(k, "")).strip()
-        for k in ("number", "name")
-        if street.get(k) not in (None, "")
+def get_users():
+    response = requests.get(
+        API_URL,
+        params={
+            "results": COUNT,
+            "seed": os.getenv("RANDOMUSER_SEED", "randomuser-threaded-demo"),
+            "inc": "name,dob,location,phone,login",
+            "noinfo": "1",
+        },
+        timeout=90,
     )
-    parts = [
-        street_text, loc.get("city"), loc.get("state"),
-        loc.get("postcode"), loc.get("country")
-    ]
-    return ", ".join(str(x).strip() for x in parts if x not in (None, ""))
-
-def fetch_users():
-    params = {
-        "results": COUNT,
-        "seed": SEED,
-        "inc": "name,dob,location,phone,login",
-        "noinfo": "1",
-    }
-    response = requests.get(API_URL, params=params, timeout=60)
     response.raise_for_status()
-    payload = response.json()
-    if payload.get("error"):
-        raise RuntimeError(f"RandomUser API error: {payload['error']}")
-    users = payload.get("results")
-    if not isinstance(users, list) or len(users) != COUNT:
-        got = len(users) if isinstance(users, list) else "invalid response"
-        raise RuntimeError(f"Expected {COUNT} users, received {got}.")
+    users = response.json().get("results", [])
+    if len(users) != COUNT:
+        raise RuntimeError(f"Expected {COUNT} profiles, got {len(users)}")
     return users
 
-def birthday(user):
-    dob = user.get("dob") or {}
-    return str(dob.get("date", ""))[:10]
+def full_name(u):
+    n = u.get("name") or {}
+    return " ".join(str(n.get(k, "")).strip() for k in ("title", "first", "last") if n.get(k)).strip()
 
-def set_comment_only(cell, value):
-    # Called only for explicitly bounded cells B:F. Store data in comment, not cell text.
-    cell.value = None
-    cell.comment = Comment(str(value or ""), COMMENT_AUTHOR)
+def birthday(u):
+    return str((u.get("dob") or {}).get("date", ""))[:10]
+
+def address(u):
+    loc = u.get("location") or {}
+    street = loc.get("street") or {}
+    street_line = " ".join(str(street.get(k, "")).strip() for k in ("number", "name") if street.get(k))
+    parts = [street_line, loc.get("city"), loc.get("state"), loc.get("postcode"), loc.get("country")]
+    return ", ".join(str(p).strip() for p in parts if p not in (None, ""))
+
+def build_services():
+    info = json.loads(SERVICE_ACCOUNT_JSON)
+    creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+    return (
+        build("sheets", "v4", credentials=creds, cache_discovery=False),
+        build("drive", "v3", credentials=creds, cache_discovery=False),
+    )
 
 def main():
-    if not os.path.isfile(WORKBOOK_PATH):
-        raise FileNotFoundError(
-            f"Workbook not found: {WORKBOOK_PATH}. Put the existing workbook "
-            "in the repository root or set WORKBOOK_PATH."
-        )
+    users = get_users()
+    sheets, drive = build_services()
 
-    print(f"Loading existing workbook: {WORKBOOK_PATH}")
-    wb = load_workbook(WORKBOOK_PATH)
-    if SHEET_NAME not in wb.sheetnames:
-        raise KeyError(f"Sheet '{SHEET_NAME}' not found. Sheets: {wb.sheetnames}")
+    spreadsheet = sheets.spreadsheets().create(body={
+        "properties": {"title": TITLE},
+        "sheets": [{"properties": {"title": "Generated Data", "gridProperties": {"rowCount": COUNT, "columnCount": 5}}}],
+    }, fields="spreadsheetId,spreadsheetUrl,sheets(properties(sheetId,title))").execute()
 
-    ws = wb[SHEET_NAME]
+    spreadsheet_id = spreadsheet["spreadsheetId"]
+    sheet_id = spreadsheet["sheets"][0]["properties"]["sheetId"]
 
-    # Validate only the expected header cells, all within B:F.
-    expected_headers = {
-        2: "NAME",
-        3: "BIRTH DAY",
-        4: "ADRESS",
-        5: "PHONE NUMBER",
-        6: "PASSWORD",
-    }
-    for col, expected in expected_headers.items():
-        actual = ws.cell(row=2, column=col).value
-        if actual != expected:
-            raise ValueError(
-                f"Expected header {expected!r} in {ws.cell(row=2, column=col).coordinate}, "
-                f"found {actual!r}; stopping without saving."
-            )
+    # Only A1:E398 is written/formatted/commented. No F column requests are made.
+    values = [["Entry"] * 5 for _ in range(COUNT)]
+    sheets.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range="'Generated Data'!A1:E398",
+        valueInputOption="RAW",
+        body={"values": values},
+    ).execute()
 
-    users = fetch_users()
+    sheets.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": [{
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 0,
+                "endRowIndex": COUNT,
+                "startColumnIndex": 0,
+                "endColumnIndex": 5,
+            },
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "italic": True, "fontSize": 11}}},
+            "fields": "userEnteredFormat.textFormat.bold,userEnteredFormat.textFormat.italic,userEnteredFormat.textFormat.fontSize",
+        }
+    }]}).execute()
 
-    # Explicit hard bounds: rows 3..400 and columns 2..6 (B..F) only.
-    for row, user in zip(range(FIRST_ROW, LAST_ROW + 1), users):
-        login = user.get("login") or {}
-        values = [
-            full_name(user),                    # B: NAME
-            birthday(user),                     # C: BIRTH DAY
-            full_address(user),                 # D: ADRESS
-            str(user.get("phone") or ""),       # E: PHONE NUMBER
-            str(login.get("password") or ""),   # F: PASSWORD
+    comment_requests = []
+    for row_idx, u in enumerate(users):
+        login = u.get("login") or {}
+        fields = [
+            full_name(u),
+            birthday(u),
+            address(u),
+            str(u.get("phone") or ""),
+            str(login.get("password") or ""),
         ]
-        for col in range(FIRST_COL, LAST_COL + 1):
-            value = values[col - FIRST_COL]
-            cell = ws.cell(row=row, column=col)
-            set_comment_only(cell, value)
+        for col_idx, content in enumerate(fields):
+            comment_requests.append({
+                "insertComment": {
+                    "content": str(content or "(empty)"),
+                    "coordinate": {
+                        "sheetId": sheet_id,
+                        "rowIndex": row_idx,
+                        "columnIndex": col_idx,
+                    },
+                }
+            })
 
-    # Save back to the same workbook. No iteration over all worksheet cells,
-    # no dimension-wide styling, and no access to columns A or G and beyond.
-    wb.save(WORKBOOK_PATH)
-    print(
-        f"SUCCESS: updated only {SHEET_NAME}!B{FIRST_ROW}:F{LAST_ROW} "
-        f"({COUNT} rows; {COUNT * (LAST_COL - FIRST_COL + 1)} comments)."
-    )
-    print("No script operation targets column A or columns G onward.")
+    # Batch conservatively; each cell gets exactly one comment thread and no replies.
+    for start in range(0, len(comment_requests), 100):
+        batch = comment_requests[start:start + 100]
+        sheets.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": batch},
+        ).execute()
+        print(f"Inserted comments: {min(start + len(batch), len(comment_requests))}/{len(comment_requests)}")
+        time.sleep(0.15)
+
+    # Share the created Google Sheet with the user's email.
+    drive.permissions().create(
+        fileId=spreadsheet_id,
+        body={"type": "user", "role": "writer", "emailAddress": SHARE_WITH_EMAIL},
+        sendNotificationEmail=True,
+        fields="id,emailAddress,role",
+    ).execute()
+
+    # Read back comments for verification.
+    check = sheets.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        includeGridData=False,
+        commentsViewMode="COMMENTS_VIEW_MODE_INCLUDED",
+        fields="spreadsheetId,comments,sheets(properties(sheetId,title),commentAnchors)",
+    ).execute()
+    comment_count = len(check.get("comments", []))
+    print(f"SPREADSHEET_URL={spreadsheet.get('spreadsheetUrl')}")
+    print(f"SPREADSHEET_ID={spreadsheet_id}")
+    print(f"EXPECTED_COMMENTS={COUNT * 5}")
+    print(f"COMMENTS_READ_BACK={comment_count}")
+    if comment_count != COUNT * 5:
+        raise RuntimeError(f"Comment verification failed: expected 1990, got {comment_count}")
+    print("SUCCESS: Google Sheets native comment threads verified.")
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as exc:
+    except (HttpError, Exception) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise

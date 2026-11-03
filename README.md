@@ -1,21 +1,42 @@
-# Update existing B7344.xlsx — only Work 1 columns B:F
+# RandomUser → Google Sheets native comment threads
 
-The script only targets `Work 1!B3:F400`.
+This workflow creates a **new native Google Spreadsheet** (not an `.xlsx` file) with 398 fictional RandomUser profiles.
 
-- B: NAME
-- C: BIRTH DAY
-- D: ADRESS
-- E: PHONE NUMBER
-- F: PASSWORD
+## What it creates
 
-It does not read, clear, write, add comments to, or format column A or any column from G onward. It also does not edit other worksheets. Data values are stored in Excel comments; cell text is blanked only inside B3:F400.
+- Sheet: `Generated Data`
+- Exact cell range used: `A1:E398`
+- Every cell value is `Entry`
+- Every cell is bold, italic, font size 11
+- One native Google Sheets comment thread per cell (1,990 total)
+- Comment content by column: A name, B birthday, C address, D phone, E password
+- No replies are created
+- The script makes no write, formatting, or comment requests to column F or later.
 
-## GitHub Actions setup
+This uses the Google Sheets API's `insertComment` request. It does not build comments by writing raw OOXML, and it does not create Excel Notes/legacy comments.
 
-1. Keep `B7344.xlsx` at the repository root.
-2. Add/replace `main.py`, `requirements.txt`, and `.github/workflows/update-existing-workbook.yml`.
-3. Enable read/write workflow permissions if the workflow needs to push the updated workbook.
-4. Open Actions → Update existing Excel comments → Run workflow.
-5. The workflow commits the modified `B7344.xlsx` to the same repository.
+## One-time setup
 
-The API data is fictional test data from RandomUser.me. Make a backup before the first run.
+This setup is required because GitHub Actions must be authorized to create a Google Sheet in Google Drive.
+
+1. Open Google Cloud Console and create/select a project.
+2. Enable **Google Sheets API** and **Google Drive API**.
+3. Create a service account and download its JSON key.
+4. In GitHub, open the repository → **Settings → Secrets and variables → Actions**.
+5. Add these repository secrets:
+   - `GOOGLE_SERVICE_ACCOUNT_JSON`: paste the *entire contents* of the service-account JSON key file.
+   - `SHARE_WITH_EMAIL`: your Google account email address. The created sheet will be shared with this account as Editor.
+6. Make sure the service account is allowed to create files in Drive under the project's configuration. Some Google Workspace accounts restrict service accounts; if so, use an OAuth user-token workflow instead.
+7. Go to **Actions → Create Google Sheets with native comment threads → Run workflow**.
+
+## Where the result appears
+
+The workflow log prints `SPREADSHEET_URL`. Open the run log and tap/copy that URL. The sheet is also shared with the email in `SHARE_WITH_EMAIL`.
+
+## Important notes
+
+- The profiles come from RandomUser and are fictional test data. Do not use generated passwords for real accounts.
+- The generated file is a Google Spreadsheet. This is the right format to verify native Google Sheets comment threads in the Google Sheets app.
+- Exporting to `.xlsx` may not preserve all Google Sheets-native comment behavior exactly; verify in Google Sheets first.
+- The script verifies the comment count using the Sheets API and fails if it cannot read back all 1,990 comment threads.
+- If the API returns an error, read the GitHub Actions log. Google APIs/permissions can vary by account and project.
